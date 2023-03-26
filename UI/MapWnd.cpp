@@ -2,14 +2,13 @@
 
 #include <deque>
 #include <numeric>
-#include <unordered_map>
-#include <unordered_set>
-#include <valarray>
 #include <vector>
 #include <boost/graph/graph_concepts.hpp>
 #include <boost/optional/optional.hpp>
 #include <boost/range/adaptor/map.hpp>
 #include <boost/range/numeric.hpp>
+#include <boost/unordered_map.hpp>
+#include <boost/unordered_set.hpp>
 #include <GG/Layout.h>
 #include <GG/MultiEdit.h>
 #include <GG/PtRect.h>
@@ -648,13 +647,13 @@ namespace {
             DoLayout();
         }
 
-        std::unordered_map<std::string, int>            m_values;             ///< Internal value for display with a description
-        std::unordered_map<std::string, LabelValueType> m_labels;             ///< Label controls mapped to the description key
-        std::unordered_map<int, int>                    m_ship_design_counts; ///< Map of ship design ids to the number of ships with that id
-        std::vector<LabelValueType>                     m_ship_design_labels; ///< Label controls for ship designs, sorted by disply name
-        int                                             m_empire_id;          ///< ID of the viewing empire
-        std::vector<GG::X>                              m_col_widths;         ///< widths of each column
-        int                                             m_margin;             ///< margin between controls
+        boost::unordered_map<std::string, int>            m_values;             ///< Internal value for display with a description
+        boost::unordered_map<std::string, LabelValueType> m_labels;             ///< Label controls mapped to the description key
+        boost::unordered_map<int, int>                    m_ship_design_counts; ///< Map of ship design ids to the number of ships with that id
+        std::vector<LabelValueType>                       m_ship_design_labels; ///< Label controls for ship designs, sorted by disply name
+        int                                               m_empire_id;          ///< ID of the viewing empire
+        std::vector<GG::X>                                m_col_widths;         ///< widths of each column
+        int                                               m_margin;             ///< margin between controls
     };
 }
 
@@ -2221,8 +2220,8 @@ void MapWnd::RenderStarlanes() {
     if (GetGameRules().Get<bool>("RULE_STARLANES_EVERYWHERE"))
         return;
 
-    bool coloured = GetOptionsDB().Get<bool>("ui.map.starlane.empire.color.shown");
-    float core_multiplier = static_cast<float>(GetOptionsDB().Get<double>("ui.map.starlane.thickness.factor"));
+    const bool coloured = GetOptionsDB().Get<bool>("ui.map.starlane.empire.color.shown");
+    const float core_multiplier = static_cast<float>(GetOptionsDB().Get<double>("ui.map.starlane.thickness.factor"));
     RenderStarlanes(m_RC_starlane_vertices, m_RC_starlane_colors, core_multiplier * ZoomFactor(), coloured, false);
     RenderStarlanes(m_starlane_vertices, m_starlane_colors, 1.0, coloured, true);
 }
@@ -2535,7 +2534,7 @@ namespace {
     auto GetFleetFutureTurnDetectionRangeCircles(const ScriptingContext& context,
                                                  const std::set<int>& fleet_ids)
     {
-        std::unordered_map<GG::Clr, std::vector<std::pair<GG::Pt, GG::Pt>>, hash_clr> retval;
+        boost::unordered_map<GG::Clr, std::vector<std::pair<GG::Pt, GG::Pt>>, hash_clr> retval;
 
         for (const auto* fleet : context.ContextObjects().findRaw<Fleet>(fleet_ids)) {
             float fleet_detection_range = 0.0f;
@@ -3352,11 +3351,30 @@ void MapWnd::ClearSystemRenderingBuffers() {
     m_star_circle_vertices.clear();
 }
 
-namespace GetPathsThroughSupplyLanes {
-    // SupplyLaneMap map keyed by system containing all systems
-    // corresponding to valid supply lane destinations
-    typedef std::unordered_multimap<int,int> SupplyLaneMMap;
+namespace {
+    // PathInfo stores the \p ids of systems one hop back on a path
+    // toward an \p o originating terminal system.
+    struct PathInfo {
+        PathInfo(int a, int o) : one_hop_back(1, a), single_origin(o) {}
+        PathInfo(int o) : one_hop_back(), single_origin(o) {}
+        // system(s) one hop back on the path.
+        // The terminal point has no preceding system.
+        // Merged paths are indicated with multiple preceding systems.
+        std::vector<int> one_hop_back;
+        // The originating terminal point.
+        // If single origin is boost::none then two paths with at least
+        // two different terminal points merged.
+        boost::optional<int> single_origin;
+    };
 
+    struct PrevCurrInfo {
+        constexpr PrevCurrInfo(int p, int n, int o) noexcept :
+            prev(p),
+            curr(n),
+            origin(o)
+        {}
+        int prev, curr, origin;
+    };
 
     /**
        GetPathsThroughSupplyLanes starts with:
@@ -3421,43 +3439,16 @@ namespace GetPathsThroughSupplyLanes {
        The second part stops back tracking along paths when it reaches
        systems already on the good path.
 
-     */
-    void GetPathsThroughSupplyLanes(
-        std::unordered_set<int>& good_path,
-        const std::unordered_set<int>& terminal_points,
-        const SupplyLaneMMap& supply_lanes);
-
-
-    // PathInfo stores the \p ids of systems one hop back on a path
-    // toward an \p o originating terminal system.
-    struct PathInfo {
-        PathInfo(int a, int o) : one_hop_back(1, a), single_origin(o) {}
-        PathInfo(int o) : one_hop_back(), single_origin(o) {}
-        // system(s) one hop back on the path.
-        // The terminal point has no preceding system.
-        // Merged paths are indicated with multiple preceding systems.
-        std::vector<int> one_hop_back;
-        // The originating terminal point.
-        // If single origin is boost::none then two paths with at least
-        // two different terminal points merged.
-        boost::optional<int> single_origin;
-    };
-
-    struct PrevCurrInfo {
-        PrevCurrInfo(int p, int n, int o) : prev(p), curr(n), origin(o) {}
-        int prev, curr, origin;
-    };
-
-    void GetPathsThroughSupplyLanes(
-        std::unordered_set<int> & good_path,
-        const std::unordered_set<int> & terminal_points,
-        const SupplyLaneMMap& supply_lanes)
+    */
+    template <typename IntSet>
+    auto GetPathsThroughSupplyLanes(const IntSet& terminal_points,
+                                    const boost::unordered_multimap<int, int>& supply_lanes)
     {
-        good_path.clear();
+        boost::unordered_set<int> good_path;
 
         // No terminal points, so all paths lead nowhere.
         if (terminal_points.empty())
-            return;
+            return good_path;
 
         // Part One:  Find all reachable mid points between two different
         // terminal points.
@@ -3467,7 +3458,7 @@ namespace GetPathsThroughSupplyLanes {
         std::deque<PrevCurrInfo> try_next;
 
         // visited holds systems already reached by the breadth first search.
-        std::unordered_map<int, PathInfo> visited;
+        boost::unordered_map<int, PathInfo> visited;
 
         // reachable_midpoints holds all systems reachable from at least
         // two different terminal points.
@@ -3491,7 +3482,7 @@ namespace GetPathsThroughSupplyLanes {
             for (auto sup_it = supplylane_endpoints.first;
                  sup_it != supplylane_endpoints.second; ++sup_it)
             {
-                int next = sup_it->second;
+                const int next = sup_it->second;
 
                 // Skip the system if it back tracks.
                 if (next == curr.prev)
@@ -3533,8 +3524,9 @@ namespace GetPathsThroughSupplyLanes {
                     // point on a good path to multiple terminal
                     // points.  Add curr to the systems one hop back
                     // along the path to previous.
-                    } else
+                    } else {
                         previous->second.one_hop_back.push_back(curr.curr);
+                    }
                 }
             }
             try_next.pop_front();
@@ -3547,7 +3539,7 @@ namespace GetPathsThroughSupplyLanes {
 
         // No terminal point has a path to any other terminal point.
         if (reachable_midpoints.empty())
-            return;
+            return good_path;
 
         // Return all systems on any path back to a terminal point.
         // Start from every mid point and back track along all paths
@@ -3556,10 +3548,10 @@ namespace GetPathsThroughSupplyLanes {
         // path.
 
         // All visited systems on the path(s) from this midpoint not yet processed.
-        std::unordered_set<int> unprocessed;
+        boost::unordered_set<int> unprocessed;
 
         for (int reachable_midpoint : reachable_midpoints) {
-            std::unordered_map<int, PathInfo>::const_iterator previous_ii_sys;
+            boost::unordered_map<int, PathInfo>::const_iterator previous_ii_sys;
             int ii_sys;
 
             // Add the mid point to unprocessed, and while there
@@ -3581,7 +3573,7 @@ namespace GetPathsThroughSupplyLanes {
                 }
             }
         }
-        return;
+        return good_path;
     }
 }
 
@@ -3630,11 +3622,11 @@ namespace {
 
 
     void GetResPoolLaneInfo(int empire_id,
-                            std::unordered_map<std::set<int>, std::set<int>, hash_set>& res_pool_systems,
-                            std::unordered_map<std::set<int>, std::set<int>, hash_set>& res_group_cores,
-                            std::unordered_set<int>& res_group_core_members,
-                            std::unordered_map<int, std::set<int>>& member_to_core,
-                            std::unordered_set<int>& under_alloc_res_grp_core_members)
+                            boost::unordered_map<std::set<int>, std::set<int>, hash_set>& res_pool_systems,
+                            boost::unordered_map<std::set<int>, std::set<int>, hash_set>& res_group_cores,
+                            boost::unordered_set<int>& res_group_core_members,
+                            boost::unordered_map<int, std::set<int>>& member_to_core,
+                            boost::unordered_set<int>& under_alloc_res_grp_core_members)
     {
         res_pool_systems.clear();
         res_group_cores.clear();
@@ -3650,27 +3642,23 @@ namespace {
         auto& available_pp(empire->GetIndustryPool().Output());
         // For each industry set,
         // add all planet's systems to res_pool_systems[industry set]
-        for (const auto& available_pp_group : available_pp) {
-            float group_pp = available_pp_group.second;
+        for (const auto& [group_object_ids, group_pp] : available_pp) {
             if (group_pp < 1e-4f)
                 continue;
 
             // std::string this_pool = "( ";
-            for (int object_id : available_pp_group.first) {
+            for (int object_id : group_object_ids) {
                 // this_pool += std::to_string(object_id) +", ";
 
-                auto planet = Objects().get<Planet>(object_id).get();
+                auto planet = Objects().getRaw<Planet>(object_id);
                 if (!planet)
                     continue;
 
                 //DebugLogger() << "Empire " << empire_id << "; Planet (" << object_id << ") is named " << planet->Name();
 
-                int system_id = planet->SystemID();
-                auto system = Objects().get<System>(system_id).get();
-                if (!system)
-                    continue;
-
-                res_pool_systems[available_pp_group.first].insert(system_id);
+                const int system_id = planet->SystemID();
+                if (Objects().getRaw<System>(system_id))
+                    res_pool_systems[group_object_ids].insert(system_id);
             }
             // this_pool += ")";
             //DebugLogger() << "Empire " << empire_id << "; ResourcePool[RE_INDUSTRY] resourceGroup (" << this_pool << ") has (" << available_pp_group.second << " PP available";
@@ -3680,36 +3668,27 @@ namespace {
 
         // Convert supply starlanes to non-directional.  This saves half
         // of the lookups.
-        GetPathsThroughSupplyLanes::SupplyLaneMMap resource_supply_lanes_undirected;
-        const auto& resource_supply_lanes_directed =
-            GetSupplyManager().SupplyStarlaneTraversals(empire_id);
-
-        for (const auto& supply_lane : resource_supply_lanes_directed) {
-            resource_supply_lanes_undirected.emplace(supply_lane.first, supply_lane.second);
-            resource_supply_lanes_undirected.emplace(supply_lane.second, supply_lane.first);
-        }
+        const auto resource_supply_lanes_undirected = [empire_id]() {
+            boost::unordered_multimap<int, int> retval;
+            for (const auto& [f, s] : GetSupplyManager().SupplyStarlaneTraversals(empire_id)) {
+                retval.emplace(f, s);
+                retval.emplace(s, f);
+            }
+            return retval;
+        }();
 
         // For each pool of resources find all paths available through
         // the supply network.
 
-        for (auto& res_pool_system : res_pool_systems) {
-            auto& group_core = res_group_cores[res_pool_system.first];
+        for (auto& [object_ids, system_ids] : res_pool_systems) {
+            auto& group_core = res_group_cores[object_ids];
 
             // All individual resource system are included in the
             // network on their own.
-            group_core.insert(res_pool_system.second.begin(),
-                              res_pool_system.second.end());
-            res_group_core_members.insert(res_pool_system.second.begin(),
-                                          res_pool_system.second.end());
+            group_core.insert(system_ids.begin(), system_ids.end());
+            res_group_core_members.insert(system_ids.begin(), system_ids.end());
 
-            // Convert res_pool_system.second from set<int> to
-            // unordered_set<int> to improve lookup speed.
-            std::unordered_set<int> terminal_points{res_pool_system.second.begin(),
-                                                    res_pool_system.second.end()};
-
-            std::unordered_set<int> paths;
-            GetPathsThroughSupplyLanes::GetPathsThroughSupplyLanes(
-                paths, terminal_points, resource_supply_lanes_undirected);
+            const auto paths = GetPathsThroughSupplyLanes(system_ids, resource_supply_lanes_undirected);
 
             // All systems on the paths are valid end points so they are
             // added to the core group of systems that will be rendered
@@ -3729,7 +3708,7 @@ namespace {
 
             auto allocated_it = allocated_pp.find(available_pp_group.first);
             if (allocated_it == allocated_pp.end() || (group_pp > allocated_it->second + 0.05)) {
-                auto group_core_it = res_group_cores.find(available_pp_group.first);
+                const auto group_core_it = res_group_cores.find(available_pp_group.first);
                 if (group_core_it != res_group_cores.end()) {
                     under_alloc_res_grp_core_members.insert(group_core_it->second.begin(),
                                                             group_core_it->second.end());
@@ -3738,8 +3717,9 @@ namespace {
         }
     }
 
-
-    void PrepFullLanesToRender(const std::unordered_map<int, std::shared_ptr<SystemIcon>>& sys_icons,
+    // TODO: pass context?
+    template <typename IDsSystemIcons_t>
+    void PrepFullLanesToRender(const IDsSystemIcons_t& sys_icons,
                                GG::GL2DVertexBuffer& starlane_vertices,
                                GG::GLRGBAColorBuffer& starlane_colors)
     {
@@ -3749,9 +3729,7 @@ namespace {
 
         std::set<std::pair<int, int>> already_rendered_full_lanes;
 
-        for (const auto& id_icon : sys_icons) {
-            int system_id = id_icon.first;
-
+        for (const auto& [system_id, icon] : sys_icons) {
             // skip systems that don't actually exist
             if (this_client_known_destroyed_objects.count(system_id))
                 continue;
@@ -3763,17 +3741,14 @@ namespace {
             }
 
             // add system's starlanes
-            for (const auto& render_lane : start_system->StarlanesWormholes()) {
-                bool lane_is_wormhole = render_lane.second;
+            for (const auto& [lane_end_sys_id, lane_is_wormhole] : start_system->StarlanesWormholes()) {
                 if (lane_is_wormhole) continue; // at present, not rendering wormholes
-
-                int lane_end_sys_id = render_lane.first;
 
                 // skip lanes to systems that don't actually exist
                 if (this_client_known_destroyed_objects.count(lane_end_sys_id))
                     continue;
 
-                auto* dest_system = Objects().getRaw<const System>(render_lane.first);
+                auto* dest_system = Objects().getRaw<const System>(lane_end_sys_id);
                 if (!dest_system)
                     continue;
 
@@ -3794,9 +3769,8 @@ namespace {
                 // determine colour(s) for lane based on which empire(s) can transfer resources along the lane.
                 // todo: multiple rendered lanes (one for each empire) when multiple empires use the same lane.
                 GG::Clr lane_colour = UNOWNED_LANE_COLOUR;    // default colour if no empires transfer resources along starlane
-                for (const auto& entry : Empires()) {
-                    const auto& empire = entry.second;
-                    const auto& resource_supply_lanes = GetSupplyManager().SupplyStarlaneTraversals(entry.first);
+                for (const auto& [empire_id, empire] : Empires()) {
+                    const auto& resource_supply_lanes = GetSupplyManager().SupplyStarlaneTraversals(empire_id);
 
                     std::pair<int, int> lane_forward{start_system->ID(), dest_system->ID()};
                     std::pair<int, int> lane_backward{dest_system->ID(), start_system->ID()};
@@ -3817,7 +3791,8 @@ namespace {
         }
     }
 
-    void PrepResourceConnectionLanesToRender(const std::unordered_map<int, std::shared_ptr<SystemIcon>>& sys_icons,
+    template <typename IDsSystemIcons_t>
+    void PrepResourceConnectionLanesToRender(const IDsSystemIcons_t& sys_icons,
                                              int empire_id,
                                              std::set<std::pair<int, int>>& rendered_half_starlanes,
                                              GG::GL2DVertexBuffer& rc_starlane_vertices,
@@ -3831,12 +3806,12 @@ namespace {
         GG::Clr lane_colour = empire->Color();
 
         // map keyed by ResourcePool (set of objects) to the corresponding set of system ids
-        std::unordered_map<std::set<int>, std::set<int>, hash_set> res_pool_systems;
+        boost::unordered_map<std::set<int>, std::set<int>, hash_set> res_pool_systems;
         // map keyed by ResourcePool to the set of systems considered the core of the corresponding ResGroup
-        std::unordered_map<std::set<int>, std::set<int>, hash_set> res_group_cores;
-        std::unordered_set<int> res_group_core_members;
-        std::unordered_map<int, std::set<int>> member_to_core;
-        std::unordered_set<int> under_alloc_res_grp_core_members;
+        boost::unordered_map<std::set<int>, std::set<int>, hash_set> res_group_cores;
+        boost::unordered_set<int> res_group_core_members;
+        boost::unordered_map<int, std::set<int>> member_to_core;
+        boost::unordered_set<int> under_alloc_res_grp_core_members;
         GetResPoolLaneInfo(empire_id, res_pool_systems,
                            res_group_cores, res_group_core_members,
                            member_to_core, under_alloc_res_grp_core_members);
@@ -3911,13 +3886,15 @@ namespace {
         }
     }
 
-    void PrepObstructedLaneTraversalsToRender(const std::unordered_map<int, std::shared_ptr<SystemIcon>>& sys_icons,
+    // TODO: pass context?
+    template <typename IDsSystemIcons_t>
+    void PrepObstructedLaneTraversalsToRender(const IDsSystemIcons_t& sys_icons,
                                               int empire_id,
                                               std::set<std::pair<int, int>>& rendered_half_starlanes,
                                               GG::GL2DVertexBuffer& starlane_vertices,
                                               GG::GLRGBAColorBuffer& starlane_colors)
     {
-        auto this_empire = GetEmpire(empire_id);
+        const auto this_empire = GetEmpire(empire_id);
         if (!this_empire)
             return;
 
@@ -3925,9 +3902,7 @@ namespace {
             GetUniverse().EmpireKnownDestroyedObjectIDs(GGHumanClientApp::GetApp()->EmpireID());
 
 
-        for (const auto& id_icon : sys_icons) {
-            int system_id = id_icon.first;
-
+        for (const auto& [system_id, icon] : sys_icons) {
             // skip systems that don't actually exist
             if (this_client_known_destroyed_objects.count(system_id))
                 continue;
@@ -3943,17 +3918,14 @@ namespace {
             }
 
             // add system's starlanes
-            for (const auto& render_lane : start_system->StarlanesWormholes()) {
-                bool lane_is_wormhole = render_lane.second;
+            for (const auto& [lane_end_sys_id, lane_is_wormhole] : start_system->StarlanesWormholes()) {
                 if (lane_is_wormhole) continue; // at present, not rendering wormholes
-
-                int lane_end_sys_id = render_lane.first;
 
                 // skip lanes to systems that don't actually exist
                 if (this_client_known_destroyed_objects.count(lane_end_sys_id))
                     continue;
 
-                auto dest_system = Objects().get<System>(render_lane.first);
+                auto dest_system = Objects().get<System>(lane_end_sys_id);
                 if (!dest_system)
                     continue;
                 //std::cout << "colouring lanes between " << start_system->Name() << " and " << dest_system->Name() << std::endl;
@@ -3977,13 +3949,13 @@ namespace {
                     // found an empire that has a half lane here, so add it.
                     rendered_half_starlanes.emplace(start_system->ID(), dest_system->ID());  // inserted as ordered pair, so both directions can have different half-lanes
 
-                    LaneEndpoints lane_endpoints = StarlaneEndPointsFromSystemPositions(
+                    const auto lane_endpoints = StarlaneEndPointsFromSystemPositions(
                         start_system->X(), start_system->Y(), dest_system->X(), dest_system->Y());
                     starlane_vertices.store(lane_endpoints.X1, lane_endpoints.Y1);
                     starlane_vertices.store((lane_endpoints.X1 + lane_endpoints.X2) * 0.5f,   // half way along starlane
                                             (lane_endpoints.Y1 + lane_endpoints.Y2) * 0.5f);
 
-                    GG::Clr lane_colour = loop_empire->Color();
+                    const GG::Clr lane_colour = loop_empire->Color();
                     starlane_colors.store(lane_colour);
                     starlane_colors.store(lane_colour);
 
@@ -3995,18 +3967,15 @@ namespace {
         }
     }
 
-    std::map<std::pair<int, int>, LaneEndpoints> CalculateStarlaneEndpoints(
-        const std::unordered_map<int, std::shared_ptr<SystemIcon>>& sys_icons)
-    {
-
-        std::map<std::pair<int, int>, LaneEndpoints> retval;
+    template <typename IDsIcons_t>
+    auto CalculateStarlaneEndpoints(const IDsIcons_t& sys_icons) {
+        std::map<std::pair<int, int>, LaneEndpoints> retval; // TODO: flat_map ? is assigned to m_starlane_endpoints
 
         const auto& this_client_known_destroyed_objects =
             GetUniverse().EmpireKnownDestroyedObjectIDs(GGHumanClientApp::GetApp()->EmpireID());
 
-        for (auto const& id_icon : sys_icons) {
-            int system_id = id_icon.first;
-
+        for (auto const& [system_id, ignored_icon] : sys_icons) {
+            (void)ignored_icon;
             // skip systems that don't actually exist
             if (this_client_known_destroyed_objects.count(system_id))
                 continue;
@@ -4057,15 +4026,13 @@ void MapWnd::InitStarlaneRenderingBuffers() {
 
     // temp storage
     std::set<std::pair<int, int>> rendered_half_starlanes;  // stored as unaltered pairs, so that a each direction of traversal can be shown separately
-
+    const auto empire_id = GGHumanClientApp::GetApp()->EmpireID();
 
     // add vertices and colours to lane rendering buffers
     PrepFullLanesToRender(m_system_icons, m_starlane_vertices, m_starlane_colors);
-    PrepResourceConnectionLanesToRender(m_system_icons, GGHumanClientApp::GetApp()->EmpireID(),
-                                        rendered_half_starlanes,
+    PrepResourceConnectionLanesToRender(m_system_icons, empire_id, rendered_half_starlanes,
                                         m_RC_starlane_vertices, m_RC_starlane_colors);
-    PrepObstructedLaneTraversalsToRender(m_system_icons, GGHumanClientApp::GetApp()->EmpireID(),
-                                         rendered_half_starlanes,
+    PrepObstructedLaneTraversalsToRender(m_system_icons, empire_id, rendered_half_starlanes,
                                          m_starlane_vertices, m_starlane_colors);
 
 
@@ -4212,7 +4179,7 @@ void MapWnd::InitVisibilityRadiiRenderingBuffers() {
     //auto empire_position_max_detection_ranges = universe.GetEmpiresPositionNextTurnFleetDetectionRanges(context);
 
 
-    std::unordered_map<GG::Clr, std::vector<std::pair<GG::Pt, GG::Pt>>, hash_clr> circles;
+    boost::unordered_map<GG::Clr, std::vector<std::pair<GG::Pt, GG::Pt>>, hash_clr> circles;
 
 
     for (const auto& [empire_id, detection_circles] : empire_position_max_detection_ranges) {
@@ -4923,7 +4890,7 @@ void MapWnd::DoFieldIconsLayout() {
 void MapWnd::DoFleetButtonsLayout() {
     const ObjectMap& objects = GetUniverse().Objects();
 
-    auto place_system_fleet_btn = [this](const std::unordered_map<int, std::unordered_set<std::shared_ptr<FleetButton>>>::value_type& system_and_btns, bool is_departing) {
+    auto place_system_fleet_btn = [this](const auto& system_and_btns, bool is_departing) {
         // calculate system icon position
         auto system = Objects().get<System>(system_and_btns.first);
         if (!system) {
@@ -5036,7 +5003,7 @@ boost::optional<std::pair<double, double>> MapWnd::MovingFleetMapPositionOnLane(
 
 namespace {
     template <typename Key>
-    using KeyToFleetsMap = std::unordered_map<Key, std::vector<int>, boost::hash<Key>>;
+    using KeyToFleetsMap = boost::unordered_map<Key, std::vector<int>, boost::hash<Key>>;
     using SystemXEmpireToFleetsMap = KeyToFleetsMap<std::pair<int, int>>;
     using LocationXEmpireToFleetsMap = KeyToFleetsMap<std::pair<std::pair<double, double>, int>>;
     using StarlaneToFleetsMap = KeyToFleetsMap<std::pair<int, int>>;
@@ -7564,12 +7531,12 @@ bool MapWnd::IsFleetExploring(const int fleet_id)
 
 namespace {
     typedef std::set<int> SystemIDListType;
-    typedef std::unordered_set<int> FleetIDListType;
+    typedef boost::unordered_set<int> FleetIDListType;
     typedef std::vector<int> RouteListType;
     typedef std::pair<double, RouteListType> OrderedRouteType;
     typedef std::pair<int, RouteListType> FleetRouteType;
     typedef std::pair<double, FleetRouteType> OrderedFleetRouteType;
-    typedef std::unordered_map<int, int> SystemFleetMap;
+    typedef boost::unordered_map<int, int> SystemFleetMap;
 
     /** Number of jumps in a given route */
     int JumpsForRoute(const RouteListType& route) {
@@ -7991,7 +7958,7 @@ void MapWnd::DispatchFleetsExploring() {
     std::multimap<double, FleetRouteType> fleet_routes;  // priority, (fleet, route)
 
     // Determine fleet routes for each unexplored system
-    std::unordered_map<int, int> fleet_route_count;
+    boost::unordered_map<int, int> fleet_route_count;
     for (const auto* unexplored_system : objects.findRaw<System>(unexplored_systems)) {
         if (!unexplored_system)
             continue;
