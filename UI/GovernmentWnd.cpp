@@ -484,12 +484,11 @@ void PoliciesListBox::AcceptDrops(GG::Pt, std::vector<std::shared_ptr<GG::Wnd>> 
 std::map<std::string, std::vector<const Policy*>>
 PoliciesListBox::GroupAvailableDisplayablePolicies(const Empire*) const {
     std::map<std::string, std::vector<const Policy*>> policies_categorized;
+    static constexpr auto to_policy_and_cat = [](const auto& p) -> std::pair<const Policy&, const std::string&>
+    { return {p, p.Category()}; };
 
     // loop through all possible policies
-    for (auto& [policy_name, policy] : GetPolicyManager()) {
-        (void)policy_name; // quiet warning
-        const auto& category = policy.Category();
-
+    for (const auto& [policy, category]: GetPolicyManager() | range_values | range_transform(to_policy_and_cat)) {
         // check whether this policy should be shown in list
         if (!m_policy_categories_shown.contains(category))
             continue;   // policies of this category are not requested to be shown
@@ -531,8 +530,8 @@ void PoliciesListBox::Populate() {
 
     // filter policies by availability and current designation of categories
     // for display
-    for (auto& [category_name, policies_vec] : GroupAvailableDisplayablePolicies(empire)) {
-        (void)category_name; // quiet warning
+    const auto policies = GroupAvailableDisplayablePolicies(empire);
+    for (const auto& policies_vec : policies | range_values) { // TODO: if std::views::join is available, avoid douple loop by flattening
         // take the sorted policies and make UI element rows for the PoliciesListBox
         for (const auto policy : policies_vec) {
             // check if current row is full, and make a new row if necessary
