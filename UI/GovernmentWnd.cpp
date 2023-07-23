@@ -346,8 +346,8 @@ public:
 
     explicit PoliciesListBox(const AvailabilityManager& availabilities_state);
 
-    const std::set<std::string>&    GetCategoriesShown() const;
-    const AvailabilityManager&      AvailabilityState() const { return m_availabilities_state; }
+    const auto& GetCategoriesShown() const noexcept { return m_policy_categories_shown; }
+    const auto& AvailabilityState() const noexcept { return m_availabilities_state; }
 
     void SizeMove(GG::Pt ul, GG::Pt lr) override;
     void AcceptDrops(GG::Pt pt, std::vector<std::shared_ptr<GG::Wnd>> wnds,
@@ -375,7 +375,7 @@ private:
     GroupAvailableDisplayablePolicies(const Empire* empire) const;
 
     mutable boost::signals2::scoped_connection m_empire_policies_changed_signal_connection;
-    std::set<std::string>                      m_policy_categories_shown;
+    boost::container::flat_set<std::string>    m_policy_categories_shown;
     int                                        m_previous_num_columns = -1;
     const AvailabilityManager&                 m_availabilities_state;
 };
@@ -436,18 +436,13 @@ PoliciesListBox::PoliciesListBox(const AvailabilityManager& availabilities_state
     SetStyle(GG::LIST_NOSEL);
 }
 
-const std::set<std::string>& PoliciesListBox::GetCategoriesShown() const
-{ return m_policy_categories_shown; }
-
 void PoliciesListBox::SizeMove(GG::Pt ul, GG::Pt lr) {
-    GG::Pt old_size = GG::Wnd::Size();
+    const GG::Pt old_size = GG::Wnd::Size();
 
-    auto policy_palette = Parent();
-    auto gov_wnd = std::dynamic_pointer_cast<GovernmentWnd>(policy_palette->Parent());
+    const auto policy_palette = Parent();
+    const auto gov_wnd = std::dynamic_pointer_cast<GovernmentWnd>(policy_palette->Parent());
 
-    GG::Pt slot_size = GG::Pt(SLOT_CONTROL_WIDTH, SLOT_CONTROL_HEIGHT);
-    if (gov_wnd)
-        slot_size = gov_wnd->GetPolicySlotSize();
+    const GG::Pt slot_size = gov_wnd ? gov_wnd->GetPolicySlotSize() : GG::Pt(SLOT_CONTROL_WIDTH, SLOT_CONTROL_HEIGHT);
 
     // maybe later do something interesting with docking
     CUIListBox::SizeMove(ul, lr);
@@ -488,7 +483,9 @@ PoliciesListBox::GroupAvailableDisplayablePolicies(const Empire*) const {
     { return {p, p.Category()}; };
 
     // loop through all possible policies
-    for (const auto& [policy, category]: GetPolicyManager() | range_values | range_transform(to_policy_and_cat)) {
+    auto policies_rng = GetPolicyManager() | range_values;
+    auto policy_cat_rng = policies_rng | range_transform(to_policy_and_cat);
+    for (const auto& [policy, category] : policy_cat_rng) {
         // check whether this policy should be shown in list
         if (!m_policy_categories_shown.contains(category))
             continue;   // policies of this category are not requested to be shown
